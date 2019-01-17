@@ -1,0 +1,216 @@
+#!/usr/bin/lua
+
+local argparse = require 'argparse'
+local io = require "io"
+
+local version = '1.0'
+local firmware_size_bytes = 7936*1024
+local fw1_addr = 0x9f050000
+local fw2_addr = 0x9f050000 + firmware_size_bytes
+
+-- safe upgrade script, generated with bootscript.py, DO NOT edit here!
+local bootcmd = 'run preboot; boot_part=${stable_part}; if test ${testing_part} -ne 0; then echo Testing part ${testing_part}; boot_part=${testing_part}; set testing_part 0; saveenv; fi; if test ${boot_part} -eq 2; then fw_addr=${fw2_addr}; run boot_2; else fw_addr=${fw1_addr}; run boot_1; fi; run boot_1; bootm ${fw1_addr};'
+
+
+function get_uboot_env(key)
+    local handle = io.popen("fw_printenv -n " .. key .. " 2>&1")
+    local value = handle:read("*a")
+    handle:close()
+
+    if value:find('## Error:') == nil then
+        -- remove EOL
+        local value = value:sub(1, -2)
+        return value        
+    else
+        return nil
+    end
+end
+
+function set_uboot_env(key, value)
+    print("DEBUG: seting key:" .. key)
+    print("DEBUG: value:" .. value)
+    local handle = io.popen("fw_setenv " .. key .. " '" .. value .. "'")
+    local value = handle:read("*a")
+    handle:close()
+end
+
+function fw_env_configured()
+    local f = io.open('/etc/fw_env.config', "rb")
+    if f then f:close() end
+    return f ~= nil
+end
+
+function fw_env_configure()
+    local f = io.open('/etc/fw_env.config', 'w')
+    -- config for LibreRouter v1 board
+    local fw_env_config = '# partition     offset      size\n' ..
+                          '/dev/mtd1       0x0000      0x10000'
+    f:write(fw_env_config)
+    f:close()
+end
+
+function get_current_cmdline()
+    local handle = io.open('/proc/cmdline', 'r')
+    local data = handle:read()
+    handle:close()
+    return data
+end
+
+function get_current_partition()
+    local handle = io.open('/proc/mtd', 'r')
+    local data = handle:read("*all")
+    handle:close()
+    if data:find("fw2") == nil then
+        return 2
+    else
+        return 1
+    end
+end
+
+function get_partitions()
+    local p = {}
+    p.current = get_current_partition()
+    if p.current == 1 then
+        p.other = 2
+    else
+        p.other = 1
+    end
+    p.stable = tonumber(get_uboot_env('stable_part'))
+    p.testing = tonumber(get_uboot_env('testing_part'))
+
+    return p
+end
+
+function parse_args()
+    local parser = argparse('safeupgrade', 'Safe upgrade mechanism for dual-boot systems')
+    parser:command_target('command')
+    local show = parser:command('show')
+    local upgrade = parser:command('upgrade')
+    upgrade:argument("firmware", "frimware image (xxx-sysupgrade.bin)")
+    local confirm = parser:command('confirm')
+    local install = parser:command('install', 'Install the safe-upgrade mechanism')
+    
+    local args = parser:parse()
+    return args
+end
+
+function get_su_version()
+    return get_uboot_env('su_version')
+end
+
+function is_su_installed()
+    return get_su_version() ~= nil
+end
+
+function fw_env_config()
+    if not fw_env_configured() then
+        print('fw_env.config not found, installing /etc/fw_env.config')
+        fw_env_configure()
+    end
+end
+
+function install(args)
+    --TODO: add --force option to upgade SU
+    if is_su_installed() then
+        print(string.format("safe-upgrade version '%s' is already installed, aborting",
+                            get_su_version()))
+        os.exit(121)
+    end
+
+    
+    if get_current_partition() ~= 1 then
+        print("installing safe-upgade from partition 2 is not supported yet")
+        os.exit(120)
+    end
+    
+    set_uboot_env('stable_part', '1')
+    set_uboot_env('testing_part', '0')
+    set_uboot_env('fw1_addr', string.format("0x%x", fw1_addr))
+    set_uboot_env('fw2_addr', string.format("0x%x", fw2_addr))
+    
+    -- configure cmdline using the current cmdline config to not force
+    -- us to know here the correct cmdline bootargs of the running kernel
+    local boot_1 = 'set bootargs ' .. get_current_cmdline() .. '; echo booting part 1; bootm ${fw_addr};'
+    set_uboot_env('boot_1', boot_1)
+    set_uboot_env('su_version', version)
+
+    -- installing the script. Everything must be installed before this!
+    set_uboot_env('bootcmd', bootcmd)
+    print('succesfully installed safe-upgrade')
+end
+
+function upgrade(args)
+    if not is_su_installed() then
+        print('safe-upgrade is not installed, aborting')
+        os.exit(114)
+    end
+    local partitions = get_partitions()
+
+
+    -- TODO: validate that the firmware is valid por this board
+
+    print(string.format("erasing partition %d", partitions.other))
+    os.execute(string.format("mtd erase fw%d", partitions.other))
+    print(string.format("writing partition %d", partitions.other))
+    os.execute(string.format("mtd write %s fw%d", args.firmware, partitions.other))
+    
+    -- TODO: copy basic config from the current partition
+
+    -- TODO: load bootargs from acompaning image, here is hardcoded!!
+    
+    if partitions.other == 2 then
+        fw_mtd_str = '7936k(fw1),7936k(firmware)'
+    else
+        fw_mtd_str = '7936k(firmware),7936k(fw2)'
+    end
+    local boot_script_tpl = 'set bootargs console=ttyS0,115200 board=LIBREROUTERV1 mtdparts=spi0.0:256k(u-boot),64k(u-boot-env),%s,128k(res),64k(ART); echo booting part %d; bootm ${fw_addr};'
+    local boot_script = string.format(boot_script_tpl, fw_mtd_str, partitions.other)
+    set_uboot_env(string.format('boot_%d', partitions.other), boot_script)
+    set_uboot_env('testing_part', tostring(partitions.other))
+end
+
+function confirm(args)
+    if not is_su_installed() then
+        print('safe-upgrade is not installed, aborting')
+        os.exit(114)
+    end
+    local partitions = get_partitions()
+    if partitions.current == partitions.stable then
+        print(string.format('the current partition: %d is already the stable partition, aborting', partitions.current))
+        os.exit(113)
+    end
+    set_uboot_env('stable_part', tostring(partitions.current))
+    print(string.format('confirmed partition %d as stable partition', partitions.current))
+end
+
+
+-- detect if this module is run as a library or as a script
+if pcall(debug.getlocal, 4, 1) then
+    -- Library mode
+else
+    -- Main script mode
+    
+    -- TODO: remove fw_env_config when the images are shipped with the fw_env file
+    fw_env_config()
+
+    local args = parse_args()
+    if args.install then
+        install(args)
+    elseif args.upgrade then
+        upgrade(args)
+    elseif args.confirm then
+        confirm(args)
+    elseif args.show then
+        local su_installed_version = get_uboot_env('su_version')
+        if su_installed_version == nil then
+            print('safe-upgrade is not installed, aborting.')
+            os.exit(199)
+        end
+        print('safe-upgrade installed version: ' .. su_installed_version)
+        local partitions = get_partitions()
+        --TODO show labels of partitions, something like: partition_two_label = luci.util.trim(luci.sys.exec("dd if=/dev/" .. partition_two_mtd .. " bs=1 skip=" .. partition_skip .. " count=25" .. "  2>/dev/null"))
+        print(string.format('current partition: %d', partitions.current))
+        print(string.format('stable partition: %d', partitions.stable))
+        print(string.format('testing partition: %d', partitions.testing))
+    end
+end
