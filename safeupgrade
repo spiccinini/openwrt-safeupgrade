@@ -11,6 +11,8 @@ local fw2_addr = 0x9f050000 + firmware_size_bytes
 -- safe upgrade script, generated with bootscript.py, DO NOT edit here!
 local bootcmd = 'run preboot; boot_part=${stable_part}; if test ${testing_part} -ne 0; then echo Testing part ${testing_part}; boot_part=${testing_part}; set testing_part 0; saveenv; fi; if test ${boot_part} -eq 2; then fw_addr=${fw2_addr}; run boot_2; else fw_addr=${fw1_addr}; run boot_1; fi; run boot_1; bootm ${fw1_addr};'
 
+STABLE_PARTITION_NAME = 'stable_part'
+TESTING_PARTITION_NAME = 'testing_part'
 
 function get_uboot_env(key)
     local handle = io.popen("fw_printenv -n " .. key .. " 2>&1")
@@ -20,7 +22,7 @@ function get_uboot_env(key)
     if value:find('## Error:') == nil then
         -- remove EOL
         local value = value:sub(1, -2)
-        return value        
+        return value
     else
         return nil
     end
@@ -75,23 +77,10 @@ function get_partitions()
     else
         p.other = 1
     end
-    p.stable = tonumber(get_uboot_env('stable_part'))
-    p.testing = tonumber(get_uboot_env('testing_part'))
+    p.stable = tonumber(get_uboot_env(STABLE_PARTITION_NAME))
+    p.testing = tonumber(get_uboot_env(TESTING_PARTITION_NAME))
 
     return p
-end
-
-function parse_args()
-    local parser = argparse('safeupgrade', 'Safe upgrade mechanism for dual-boot systems')
-    parser:command_target('command')
-    local show = parser:command('show')
-    local upgrade = parser:command('upgrade')
-    upgrade:argument("firmware", "frimware image (xxx-sysupgrade.bin)")
-    local confirm = parser:command('confirm')
-    local install = parser:command('install', 'Install the safe-upgrade mechanism')
-    
-    local args = parser:parse()
-    return args
 end
 
 function get_su_version()
@@ -109,6 +98,21 @@ function fw_env_config()
     end
 end
 
+function set_testing_partition(partition)
+    set_uboot_env(TESTING_PARTITION_NAME, tostring(partition))
+end
+
+function set_stable_partition(partition)
+    set_uboot_env(STABLE_PARTITION_NAME, tostring(partition))
+end
+
+function assert_su_installed()
+    if not is_su_installed() then
+        print('safe-upgrade is not installed, aborting')
+        os.exit(114)
+    end
+end
+
 function install(args)
     --TODO: add --force option to upgade SU
     if is_su_installed() then
@@ -117,17 +121,17 @@ function install(args)
         os.exit(121)
     end
 
-    
+
     if get_current_partition() ~= 1 then
         print("installing safe-upgade from partition 2 is not supported yet")
         os.exit(120)
     end
-    
-    set_uboot_env('stable_part', '1')
-    set_uboot_env('testing_part', '0')
+
+    set_stable_partition(1)
+    set_testing_partition(0)
     set_uboot_env('fw1_addr', string.format("0x%x", fw1_addr))
     set_uboot_env('fw2_addr', string.format("0x%x", fw2_addr))
-    
+
     -- configure cmdline using the current cmdline config to not force
     -- us to know here the correct cmdline bootargs of the running kernel
     local boot_1 = 'set bootargs ' .. get_current_cmdline() .. '; echo booting part 1; bootm ${fw_addr};'
@@ -140,12 +144,8 @@ function install(args)
 end
 
 function upgrade(args)
-    if not is_su_installed() then
-        print('safe-upgrade is not installed, aborting')
-        os.exit(114)
-    end
+    assert_su_installed()
     local partitions = get_partitions()
-
 
     -- TODO: validate that the firmware is valid por this board
 
@@ -153,11 +153,11 @@ function upgrade(args)
     os.execute(string.format("mtd erase fw%d", partitions.other))
     print(string.format("writing partition %d", partitions.other))
     os.execute(string.format("mtd write %s fw%d", args.firmware, partitions.other))
-    
+
     -- TODO: copy basic config from the current partition
 
     -- TODO: load bootargs from acompaning image, here is hardcoded!!
-    
+
     if partitions.other == 2 then
         fw_mtd_str = '7936k(fw1),7936k(firmware)'
     else
@@ -166,30 +166,50 @@ function upgrade(args)
     local boot_script_tpl = 'set bootargs console=ttyS0,115200 board=LIBREROUTERV1 mtdparts=spi0.0:256k(u-boot),64k(u-boot-env),%s,128k(res),64k(ART); echo booting part %d; bootm ${fw_addr};'
     local boot_script = string.format(boot_script_tpl, fw_mtd_str, partitions.other)
     set_uboot_env(string.format('boot_%d', partitions.other), boot_script)
-    set_uboot_env('testing_part', tostring(partitions.other))
+    set_testing_partition(partitions.other)
 end
 
 function confirm(args)
-    if not is_su_installed() then
-        print('safe-upgrade is not installed, aborting')
-        os.exit(114)
-    end
+    assert_su_installed()
     local partitions = get_partitions()
     if partitions.current == partitions.stable then
         print(string.format('the current partition: %d is already the stable partition, aborting', partitions.current))
         os.exit(113)
     end
-    set_uboot_env('stable_part', tostring(partitions.current))
+    set_stable_partition(partitions.current)
     print(string.format('confirmed partition %d as stable partition', partitions.current))
 end
 
+function test_other_partition(args)
+    assert_su_installed()
+    local partitions = get_partitions()
+    set_testing_partition(partitions.other)
+    print(string.format('Next boot will run partition: %d. You may confirm it if you like after reboot.', partitions.other))
+end
+
+
+function parse_args()
+    local parser = argparse('safeupgrade', 'Safe upgrade mechanism for dual-boot systems')
+    parser:command_target('command')
+    local show = parser:command('show', 'Show the status of the system partitions.')
+    local upgrade = parser:command('upgrade', 'Upgrade firmware in a non permanent way.')
+    upgrade:argument("firmware", "frimware image (xxx-sysupgrade.bin)")
+    local confirm = parser:command('confirm', ('Confirm the current partition. Use when after an upgrade' ..
+                                              'or after running "test-other-partition".'))
+    local install = parser:command('install', 'Install the safe-upgrade mechanism')
+    local test_other_parition = parser:command('test-other-partition',
+        'Mark the other partition as testing partition.')
+    local swap_stable = parser:command('swap', 'Change the stable partition to the other partition.')
+    local args = parser:parse()
+    return args
+end
 
 -- detect if this module is run as a library or as a script
 if pcall(debug.getlocal, 4, 1) then
     -- Library mode
 else
     -- Main script mode
-    
+
     -- TODO: remove fw_env_config when the images are shipped with the fw_env file
     fw_env_config()
 
