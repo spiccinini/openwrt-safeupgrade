@@ -234,6 +234,8 @@ else
         upgrade(args)
     elseif args.confirm then
         confirm(args)
+    elseif args['test-other-partition'] then
+        test_other_partition(args)
     elseif args.show then
         local su_installed_version = get_uboot_env('su_version')
         if su_installed_version == nil then
