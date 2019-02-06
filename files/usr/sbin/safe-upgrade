@@ -59,13 +59,11 @@ function fw_env_configured()
     return f ~= nil
 end
 
-function fw_env_configure()
-    local f = io.open('/etc/fw_env.config', 'w')
-    -- config for LibreRouter v1 board
-    local fw_env_config = '# partition     offset      size\n' ..
-                          '/dev/mtd1       0x0000      0x10000'
-    f:write(fw_env_config)
-    f:close()
+function assert_fw_env_configured()
+    if not fw_env_configured() then
+        print('/etc/fw_env.confg does not exist, aborting')
+        os.exit(115)
+    end
 end
 
 function get_current_cmdline()
@@ -227,8 +225,7 @@ if pcall(debug.getlocal, 4, 1) then
 else
     -- Main script mode
 
-    -- TODO: remove fw_env_config when the images are shipped with the fw_env file
-    fw_env_config()
+    assert_fw_env_configured()
 
     local args = parse_args()
     if args.install then
