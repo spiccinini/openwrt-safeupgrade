@@ -267,7 +267,7 @@ else
         end
         print('safe-upgrade installed version: ' .. su_installed_version)
         local partitions = get_partitions()
-        --TODO show labels of partitions, something like: partition_two_label = luci.util.trim(luci.sys.exec("dd if=/dev/" .. partition_two_mtd .. " bs=1 skip=" .. partition_skip .. " count=25" .. "  2>/dev/null"))
+        --TODO show labels of partitions (maybe store them when flashing from a metadata file)
         print(string.format('current partition: %d', partitions.current))
         print(string.format('stable partition: %d', partitions.stable))
         print(string.format('testing partition: %d', partitions.testing))
