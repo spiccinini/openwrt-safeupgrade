@@ -53,10 +53,14 @@ function set_uboot_env(key, value)
     handle:close()
 end
 
-function fw_env_configured()
-    local f = io.open('/etc/fw_env.config', "rb")
+function file_exists(filename)
+    local f = io.open(filename, "rb")
     if f then f:close() end
     return f ~= nil
+end
+
+function fw_env_configured()
+    return file_exists('/etc/fw_env.config')
 end
 
 function assert_fw_env_configured()
