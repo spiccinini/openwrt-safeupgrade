@@ -193,7 +193,7 @@ function preserve_files_to_new_partition(args)
     os.execute("tar cfz /tmp/sysupgrade.tgz -C /tmp/_to_sysupgradetgz/ `ls /tmp/_to_sysupgradetgz/`")
 end
 
-function install(args)
+function bootstrap(args)
     --TODO: add --force option to upgrade SU
     if is_su_installed() then
         print(string.format("safe-upgrade version '%s' is already installed, aborting",
@@ -220,7 +220,7 @@ function install(args)
 
     -- installing the script. Everything must be installed before this!
     set_uboot_env('bootcmd', bootcmd)
-    print('succesfully installed safe-upgrade')
+    print('succesfully bootstraped safe-upgrade')
 end
 
 function upgrade(args)
@@ -320,7 +320,7 @@ function parse_args()
     local confirm = parser:command('confirm', ('Confirm the current partition. Use when after an upgrade' ..
                                               'or after running "test-other-partition".'))
 
-    local install = parser:command('install', 'Install the safe-upgrade mechanism')
+    local bootstrap = parser:command('bootstrap', 'Install the safe-upgrade mechanism')
 
     local test_other_parition = parser:command('test-other-partition',
         'Mark the other partition as testing partition.')
@@ -340,8 +340,8 @@ else
     assert_fw_env_configured()
 
     local args = parse_args()
-    if args.install then
-        install(args)
+    if args.bootstrap then
+        bootstrap(args)
     elseif args.upgrade then
         upgrade(args)
     elseif args.confirm then
@@ -354,7 +354,7 @@ else
             print('safe-upgrade is not installed, aborting.')
             os.exit(199)
         end
-        print('safe-upgrade installed version: ' .. su_installed_version)
+        print('safe-upgrade version: ' .. su_installed_version)
         local partitions = get_partitions()
         --TODO show labels of partitions (maybe store them when flashing from a metadata file)
         print(string.format('current partition: %d', partitions.current))
