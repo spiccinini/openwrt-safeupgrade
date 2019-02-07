@@ -166,14 +166,30 @@ function upgrade(args)
     assert_su_installed()
     local partitions = get_partitions()
 
-    -- TODO: validate that the firmware is valid por this board
+    -- TODO: validate that the firmware is valid for this board using metadata
+
+    local save_tar_config = '';
+    if not args.do_not_preserve_config then
+    -- It is important that the mtd -j option to preserve a file is used
+    -- with the file /tmp/sysupgrade.tgz because there are hooks in place
+    -- to unpack this tar and install the files at boot
+
+        if args.preserve_full_config then
+            print('Preserving full config')
+            os.execute("sysupgrade  --create-backup /tmp/sysupgrade.tgz")
+        end
+        save_tar_config = '-j /tmp/sysupgrade.tgz'
+        --[[ TODO: implement preserve config lime for first boot wizard,
+             the final file must be /tmp/sysupgrade.tgz
+        ]]--
+    end
 
     print(string.format("erasing partition %d", partitions.other))
     os.execute(string.format("mtd erase fw%d", partitions.other))
-    print(string.format("writing partition %d", partitions.other))
-    os.execute(string.format("mtd write %s fw%d", args.firmware, partitions.other))
 
-    -- TODO: copy basic config from the current partition
+    print(string.format("writing partition %d", partitions.other))
+    os.execute(string.format("mtd %s write %s fw%d", save_tar_config,
+                             args.firmware, partitions.other))
 
     -- TODO: load bootargs from acompaning image, here is hardcoded!!
 
@@ -213,6 +229,9 @@ function parse_args()
     local show = parser:command('show', 'Show the status of the system partitions.')
     local upgrade = parser:command('upgrade', 'Upgrade firmware in a non permanent way.')
     upgrade:argument("firmware", "frimware image (xxx-sysupgrade.bin)")
+    upgrade:flag("--preserve-full-config", ("Preserves the config files listed in /etc/sysupgrade.conf and " ..
+                                              "/lib/upgrade/keep.d/* like sysupgrade does."))
+    upgrade:flag("-n --do-not-preserve-config", ("Do not save configuration to the new partition"))
     local confirm = parser:command('confirm', ('Confirm the current partition. Use when after an upgrade' ..
                                               'or after running "test-other-partition".'))
     local install = parser:command('install', 'Install the safe-upgrade mechanism')
