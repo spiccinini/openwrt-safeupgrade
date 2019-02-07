@@ -297,7 +297,14 @@ function parse_args()
     local show = parser:command('show', 'Show the status of the system partitions.')
 
     local upgrade = parser:command('upgrade', 'Upgrade firmware in a non permanent way.')
-    upgrade:argument("firmware", "frimware image (xxx-sysupgrade.bin)")
+    function validate_file_exists(filename)
+        if file_exists(filename) then
+            return filename
+        else
+            return nil, string.format("file %q does not exists", filename)
+        end
+    end
+    upgrade:argument("firmware", "frimware image (xxx-sysupgrade.bin)"):convert(validate_file_exists)
     upgrade:flag("--preserve-full-config", ("Preserves the config files listed in /etc/sysupgrade.conf and " ..
                                               "/lib/upgrade/keep.d/* like sysupgrade does."))
     upgrade:flag("-n --do-not-preserve-config", "Do not save configuration to the new partition")
