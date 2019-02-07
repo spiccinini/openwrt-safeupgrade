@@ -30,32 +30,41 @@ local bootcmd = 'run preboot; boot_part=${stable_part}; if test ${testing_part} 
 STABLE_PARTITION_NAME = 'stable_part'
 TESTING_PARTITION_NAME = 'testing_part'
 
-safe_upgade_reboot_script = [[#!/bin/sh /etc/rc.common
+safe_upgrade_auto_reboot_script = [[#!/bin/sh /etc/rc.common
 
-REBOOT_FILE_CONFIG_PERIOD_S="/etc/safe_upgade_confirm_period_s"
-MINIMUM_REBOOT_PERIOD_S=60
+REBOOT_FILE_CONFIG_TIMEOUT_S="/etc/safe_upgrade_auto_reboot_confirm_timeout_s"
+MINIMUM_REBOOT_TIMEOUT_S=60
+PIDFILE="/var/run/safe_upgrade_auto_reboot_script.pid"
 CMD_FORCE_REBOOT="echo b > /proc/sysrq-trigger" # Immediately reboot the system without syncing or unmounting disks.
 
-START=10
+START=11
 
 start() {
-  if [ -s "$REBOOT_FILE_CONFIG_PERIOD_S" ]; then
-      read reboot_at_uptime_s < "$REBOOT_FILE_CONFIG_PERIOD_S"
+  if [ -s "$REBOOT_FILE_CONFIG_TIMEOUT_S" ]; then
+      read reboot_at_uptime_s < "$REBOOT_FILE_CONFIG_TIMEOUT_S"
   else
       exit 0
   fi
 
   # check that the reboot time is above the minimum to prevent infinite reboots
-  if [ "$reboot_at_uptime_s" -lt "$MINIMUM_REBOOT_PERIOD_S" ]; then
-      echo "safe-upgrade reboot: Less than minimum period! aborting"
+  if [ "$reboot_at_uptime_s" -lt "$MINIMUM_REBOOT_TIMEOUT_S" ]; then
+      echo "safe-upgrade reboot: Less than minimum timeout! aborting"
       exit 0
   fi
 
   (sleep "$reboot_at_uptime_s" && \
-   if [ -s "$REBOOT_FILE_CONFIG_PERIOD_S" ]; then
+   if [ -s "$REBOOT_FILE_CONFIG_TIMEOUT_S" ]; then
        reboot ; sleep 10 ; eval "$CMD_FORCE_REBOOT"
    fi
    ) &
+
+  echo $! > "$PIDFILE"
+}
+
+stop() {
+  rm "$REBOOT_FILE_CONFIG_TIMEOUT_S"
+  sync
+  kill -9 `cat "$PIDFILE"`
 }
 ]]
 
@@ -160,8 +169,32 @@ function assert_su_installed()
     end
 end
 
+function preserve_files_to_new_partition(args)
+    os.execute("mkdir -p /tmp/_to_sysupgradetgz/etc/init.d/")
+    os.execute("mkdir -p /tmp/_to_sysupgradetgz/etc/rc.d/")
+    local f = io.open("/tmp/_to_sysupgradetgz/etc/init.d/safe_upgrade_auto_reboot", "w")
+    f:write(safe_upgrade_auto_reboot_script)
+    f:close()
+
+    os.execute("chmod +x /tmp/_to_sysupgradetgz/etc/init.d/safe_upgrade_auto_reboot")
+    os.execute("ln -s ../init.d/safe_upgrade_auto_reboot /tmp/_to_sysupgradetgz/etc/rc.d/S11safe_upgrade_auto_reboot")
+
+
+    if not args.disable_reboot_safety then
+        local f = io.open("/tmp/_to_sysupgradetgz/etc/safe_upgrade_auto_reboot_confirm_timeout_s", "w")
+        f:write(args.reboot_safety_timeout)
+        f:close()
+    end
+
+    -- append files from existing /tmp/sysupgrade.tgz
+    if file_exists("/tmp/sysupgrade.tgz") then
+        os.execute("tar xfz /tmp/sysupgrade.tgz -C /tmp/_to_sysupgradetgz/")
+    end
+    os.execute("tar cfz /tmp/sysupgrade.tgz -C /tmp/_to_sysupgradetgz/ `ls /tmp/_to_sysupgradetgz/`")
+end
+
 function install(args)
-    --TODO: add --force option to upgade SU
+    --TODO: add --force option to upgrade SU
     if is_su_installed() then
         print(string.format("safe-upgrade version '%s' is already installed, aborting",
                             get_su_version()))
@@ -170,7 +203,7 @@ function install(args)
 
 
     if get_current_partition() ~= 1 then
-        print("installing safe-upgade from partition 2 is not supported yet")
+        print("installing safe-upgrade from partition 2 is not supported yet")
         os.exit(120)
     end
 
@@ -212,6 +245,8 @@ function upgrade(args)
         ]]--
     end
 
+    preserve_files_to_new_partition(args)
+
     print(string.format("erasing partition %d", partitions.other))
     os.execute(string.format("mtd erase fw%d", partitions.other))
 
@@ -239,8 +274,13 @@ function confirm(args)
         print(string.format('the current partition: %d is already the stable partition, aborting', partitions.current))
         os.exit(113)
     end
+
+    print("Canceling and disabling automatic rebool")
+    os.execute("/etc/init.d/safe_upgrade_auto_reboot stop")
+    os.execute("/etc/init.d/safe_upgrade_auto_reboot disable")
+
     set_stable_partition(partitions.current)
-    print(string.format('confirmed partition %d as stable partition', partitions.current))
+    print(string.format('Confirmed partition %d as stable partition', partitions.current))
 end
 
 function test_other_partition(args)
@@ -255,18 +295,39 @@ function parse_args()
     local parser = argparse('safe-upgrade', 'Safe upgrade mechanism for dual-boot systems')
     parser:command_target('command')
     local show = parser:command('show', 'Show the status of the system partitions.')
+
     local upgrade = parser:command('upgrade', 'Upgrade firmware in a non permanent way.')
     upgrade:argument("firmware", "frimware image (xxx-sysupgrade.bin)")
     upgrade:flag("--preserve-full-config", ("Preserves the config files listed in /etc/sysupgrade.conf and " ..
                                               "/lib/upgrade/keep.d/* like sysupgrade does."))
-    upgrade:flag("-n --do-not-preserve-config", ("Do not save configuration to the new partition"))
+    upgrade:flag("-n --do-not-preserve-config", "Do not save configuration to the new partition")
+    upgrade:flag("--disable-reboot-safety", "Disable the automatic reboot safety mechanism")
+
+    function validate_safety_timeout(value)
+        local timeout = tonumber(value)
+        if timeout == nil then
+            return nil, string.format("invalid --reboot-safety-timeout value: %q", value)
+        end
+        if timeout < 60 then
+            return nil, string.format("--reboot-safety-timeout must be greater than 60 but was %q", timeout)
+        end
+        return timeout
+    end
+    upgrade:option("--reboot-safety-timeout",
+                   "Set the timeout (in seconds) of the automatic reboot safety mechanism")
+                   :default('600'):convert(validate_safety_timeout)
+
     local confirm = parser:command('confirm', ('Confirm the current partition. Use when after an upgrade' ..
                                               'or after running "test-other-partition".'))
+
     local install = parser:command('install', 'Install the safe-upgrade mechanism')
+
     local test_other_parition = parser:command('test-other-partition',
         'Mark the other partition as testing partition.')
     --local swap_stable = parser:command('swap', 'Change the stable partition to the other partition.')
     local args = parser:parse()
+
+
     return args
 end
 
@@ -301,6 +362,3 @@ else
         print(string.format('testing partition: %d', partitions.testing))
     end
 end
-
--- TODO: add some kind of cron script like safe-reboot that performs automatic reboot if the firmware is not confirmed in a configurable period of time
--- (it must be installed in the new image!)
