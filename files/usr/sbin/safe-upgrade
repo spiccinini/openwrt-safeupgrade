@@ -237,7 +237,7 @@ function parse_args()
     local install = parser:command('install', 'Install the safe-upgrade mechanism')
     local test_other_parition = parser:command('test-other-partition',
         'Mark the other partition as testing partition.')
-    local swap_stable = parser:command('swap', 'Change the stable partition to the other partition.')
+    --local swap_stable = parser:command('swap', 'Change the stable partition to the other partition.')
     local args = parser:parse()
     return args
 end
