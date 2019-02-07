@@ -30,6 +30,34 @@ local bootcmd = 'run preboot; boot_part=${stable_part}; if test ${testing_part} 
 STABLE_PARTITION_NAME = 'stable_part'
 TESTING_PARTITION_NAME = 'testing_part'
 
+safe_upgade_reboot_script = [[#!/bin/sh /etc/rc.common
+
+REBOOT_FILE_CONFIG_PERIOD_S="/etc/safe_upgade_confirm_period_s"
+MINIMUM_REBOOT_PERIOD_S=60
+CMD_FORCE_REBOOT="echo b > /proc/sysrq-trigger" # Immediately reboot the system without syncing or unmounting disks.
+
+START=10
+
+start() {
+  if [ -s "$REBOOT_FILE_CONFIG_PERIOD_S" ]; then
+      read reboot_at_uptime_s < "$REBOOT_FILE_CONFIG_PERIOD_S"
+  else
+      exit 0
+  fi
+
+  # check that the reboot time is above the minimum to prevent infinite reboots
+  if [ "$reboot_at_uptime_s" -lt "$MINIMUM_REBOOT_PERIOD_S" ]; then
+      echo "safe-upgrade reboot: Less than minimum period! aborting"
+      exit 0
+  fi
+
+  (sleep "$reboot_at_uptime_s" && \
+   if [ -s "$REBOOT_FILE_CONFIG_PERIOD_S" ]; then
+       reboot ; sleep 10 ; eval "$CMD_FORCE_REBOOT"
+   fi
+   ) &
+}
+]]
 
 function get_uboot_env(key)
     local handle = io.popen("fw_printenv -n " .. key .. " 2>&1")
